@@ -58,9 +58,15 @@ std::optional<Key> map_editor_key(int key) {
         case GLFW_KEY_KP_ENTER: return Key::Enter;
         case GLFW_KEY_TAB: return Key::Tab;
         case GLFW_KEY_ESCAPE: return Key::Escape;
+        case GLFW_KEY_F3: return Key::F3;
         case GLFW_KEY_A: return Key::A;
         case GLFW_KEY_C: return Key::C;
         case GLFW_KEY_D: return Key::D;
+        case GLFW_KEY_F: return Key::F;
+        case GLFW_KEY_G: return Key::G;
+        case GLFW_KEY_H: return Key::H;
+        case GLFW_KEY_N: return Key::N;
+        case GLFW_KEY_O: return Key::O;
         case GLFW_KEY_S: return Key::S;
         case GLFW_KEY_V: return Key::V;
         case GLFW_KEY_X: return Key::X;
@@ -103,6 +109,7 @@ Window::Window(const char* title, int width, int height) {
     glfwSetKeyCallback(window_, on_key);
     glfwSetCharCallback(window_, on_char);
     glfwSetFramebufferSizeCallback(window_, on_framebuffer_size);
+    glfwSetWindowCloseCallback(window_, on_close);
 
     input_.get_clipboard = get_clipboard;
     input_.set_clipboard = set_clipboard;
@@ -121,13 +128,17 @@ void Window::poll_events() {
     input_.time = glfwGetTime();
     int w = 0, h = 0;
     glfwGetFramebufferSize(window_, &w, &h);
-    while ((w == 0 || h == 0) && !glfwWindowShouldClose(window_)) {
+    while ((w == 0 || h == 0) && !close_requested_) {
         glfwWaitEvents();
         glfwGetFramebufferSize(window_, &w, &h);
     }
 }
 
-bool Window::should_close() const { return glfwWindowShouldClose(window_); }
+bool Window::consume_close_request() {
+    bool r = close_requested_;
+    close_requested_ = false;
+    return r;
+}
 
 bool Window::consume_resized() {
     bool r = resized_;
@@ -220,5 +231,11 @@ void Window::on_char(GLFWwindow* w, unsigned int cp) {
 }
 
 void Window::on_framebuffer_size(GLFWwindow* w, int, int) { from(w)->resized_ = true; }
+
+void Window::on_close(GLFWwindow* w) {
+    // Let the app decide (it may need to ask about unsaved changes).
+    glfwSetWindowShouldClose(w, GLFW_FALSE);
+    from(w)->close_requested_ = true;
+}
 
 }  // namespace vig

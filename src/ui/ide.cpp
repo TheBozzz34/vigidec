@@ -2,6 +2,7 @@
 
 #include "render/font.hpp"
 #include "ui/mu.h"
+#include "ui/widgets.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -20,12 +21,13 @@ constexpr int kVmPanelWidth = 280;
 constexpr int kOutputHeight = 180;
 
 constexpr int kPanelOpts = MU_OPT_NOCLOSE | MU_OPT_NORESIZE;
+constexpr const char* kPromptTitle = "Unsaved Changes";
 
 constexpr const char* kWelcome =
     "# Welcome to the VIG IDE.\n"
     "#\n"
     "# Open a .vigas file from the explorer on the left, or start typing.\n"
-    "# Ctrl+S saves, Ctrl+Z / Ctrl+Y undo and redo.\n"
+    "# Ctrl+S saves, Ctrl+F finds, Ctrl+H replaces, Ctrl+G goes to a line.\n"
     "# Assembling, running and debugging programs on the VIG VM\n"
     "# will be wired up here.\n"
     "\n"
@@ -59,6 +61,8 @@ void Ide::log(std::string line) {
     scroll_log_frames_ = 2;
 }
 
+// --- Files ----------------------------------------------------------------------
+
 void Ide::change_directory(const fs::path& dir) {
     std::error_code ec;
     fs::path canonical = fs::weakly_canonical(dir, ec);
@@ -80,46 +84,135 @@ void Ide::change_directory(const fs::path& dir) {
     });
 }
 
-void Ide::open_file(const fs::path& path) {
+std::string Ide::display_name() const { return file_path_.empty() ? "untitled" : file_path_.filename().string(); }
+
+void Ide::new_file() {
+    editor_.set_text("");
+    editor_.set_language(Language::VigAsm);
+    editor_.request_focus();
+    file_path_.clear();
+    log("New file");
+}
+
+bool Ide::open_file(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         log("Cannot open " + path.string());
-        return;
+        return false;
     }
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     editor_.set_text(text);
     editor_.set_language(language_for_path(path.string()));
     editor_.request_focus();
     file_path_ = path;
-    pending_open_.clear();
     log("Opened " + path.string());
+    return true;
 }
 
-void Ide::request_open(const fs::path& path) {
-    if (editor_.modified() && pending_open_ != path) {
-        pending_open_ = path;
-        log("Unsaved changes - save first, or click " + path.filename().string() + " again to discard them");
-        return;
-    }
-    open_file(path);
-}
-
-void Ide::save_file() {
-    if (file_path_.empty()) {
-        log("Save: nothing to save to yet - open a file first (Save As is not implemented)");
-        return;
-    }
-    std::ofstream out(file_path_, std::ios::binary | std::ios::trunc);
+bool Ide::write_file(const fs::path& path) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
     const std::string text = editor_.text();
     if (!out || !out.write(text.data(), std::streamsize(text.size()))) {
-        log("Failed to save " + file_path_.string());
-        return;
+        log("Failed to save " + path.string());
+        return false;
     }
     editor_.mark_saved();
-    log("Saved " + file_path_.string());
+    log("Saved " + path.string());
+    return true;
+}
+
+bool Ide::save_file() {
+    if (file_path_.empty()) {
+        save_as();
+        return false;  // completes when the dialog does
+    }
+    return write_file(file_path_);
+}
+
+void Ide::save_as() {
+    const fs::path dir = file_path_.empty() ? cwd_ : file_path_.parent_path();
+    const std::string name = file_path_.empty() ? "untitled.vigas" : file_path_.filename().string();
+    file_dialog_.open(FileDialog::Mode::Save, dir, name);
+}
+
+void Ide::guarded(Action action, const fs::path& path) {
+    if (!editor_.modified()) {
+        perform(action, path);
+        return;
+    }
+    pending_ = action;
+    pending_path_ = path;
+    prompt_open_ = true;
+}
+
+void Ide::perform(Action action, const fs::path& path) {
+    pending_ = Action::None;
+    switch (action) {
+        case Action::New: new_file(); break;
+        case Action::Open: open_file(path); break;
+        case Action::Quit: quit_ = true; break;
+        case Action::None: break;
+    }
+}
+
+void Ide::request_quit() {
+    if (!prompt_open_ && !file_dialog_.is_open()) guarded(Action::Quit);
+}
+
+// --- Frame ----------------------------------------------------------------------
+
+FrameInput Ide::route_shortcuts(const FrameInput& input) {
+    FrameInput rest = input;
+    rest.keys.clear();
+
+    // While a dialog is up it owns the keyboard (it reads `input` itself).
+    if (prompt_open_ || file_dialog_.is_open()) {
+        rest.text.clear();
+        return rest;
+    }
+
+    for (const KeyEvent& ev : input.keys) {
+        if (ev.ctrl) {
+            switch (ev.key) {
+                case Key::N: guarded(Action::New); continue;
+                case Key::O: file_dialog_.open(FileDialog::Mode::Open, cwd_); continue;
+                case Key::S:
+                    if (ev.shift) {
+                        save_as();
+                    } else {
+                        save_file();
+                    }
+                    continue;
+                case Key::F: find_bar_.open(FindBar::Mode::Find, editor_); continue;
+                case Key::H: find_bar_.open(FindBar::Mode::Replace, editor_); continue;
+                case Key::G: find_bar_.open(FindBar::Mode::GoToLine, editor_); continue;
+                // Text fields have no undo of their own, so these always
+                // target the document (e.g. undoing Replace All from the bar).
+                case Key::Z:
+                    if (ev.shift) {
+                        editor_.redo();
+                    } else {
+                        editor_.undo();
+                    }
+                    continue;
+                case Key::Y: editor_.redo(); continue;
+                default: break;
+            }
+        } else if (ev.key == Key::F3) {
+            find_bar_.find_next(editor_, ev.shift);
+            continue;
+        } else if (ev.key == Key::Escape && find_bar_.is_open()) {
+            find_bar_.close(editor_);
+            continue;
+        }
+        rest.keys.push_back(ev);
+    }
+    return rest;
 }
 
 void Ide::frame(mu_Context* ctx, const FrameInput& input, int width, int height) {
+    const FrameInput widget_input = route_shortcuts(input);
+
     const int body_h = std::max(0, height - kToolbarHeight - kOutputHeight);
     const int editor_w = std::max(0, width - kExplorerWidth - kVmPanelWidth);
 
@@ -134,7 +227,7 @@ void Ide::frame(mu_Context* ctx, const FrameInput& input, int width, int height)
     }
     if (begin_docked(ctx, "Editor", mu_rect(kExplorerWidth, kToolbarHeight, editor_w, body_h),
                      kPanelOpts | MU_OPT_NOSCROLL)) {
-        editor(ctx, input);
+        editor(ctx, widget_input);
         mu_end_window(ctx);
     }
     if (begin_docked(ctx, "VM", mu_rect(kExplorerWidth + editor_w, kToolbarHeight, kVmPanelWidth, body_h))) {
@@ -145,18 +238,80 @@ void Ide::frame(mu_Context* ctx, const FrameInput& input, int width, int height)
         output(ctx);
         mu_end_window(ctx);
     }
+
+    // Modals last, on top of everything.
+    if (std::optional<fs::path> chosen = file_dialog_.update(ctx, input, width, height)) {
+        if (file_dialog_.mode() == FileDialog::Mode::Save) {
+            if (write_file(*chosen)) {
+                file_path_ = *chosen;
+                editor_.set_language(language_for_path(chosen->string()));
+                if (chosen->parent_path() == cwd_) change_directory(cwd_);
+                if (pending_ != Action::None) perform(pending_, pending_path_);
+            }
+        } else {
+            guarded(Action::Open, *chosen);
+        }
+        editor_.request_focus();
+    } else if (!file_dialog_.is_open() && pending_ != Action::None && !prompt_open_) {
+        pending_ = Action::None;  // Save As was cancelled: drop the pending action
+    }
+    if (prompt_open_) unsaved_prompt(ctx, input, width, height);
+}
+
+void Ide::unsaved_prompt(mu_Context* ctx, const FrameInput& input, int width, int height) {
+    for (const KeyEvent& ev : input.keys) {
+        if (ev.key == Key::Escape) {
+            prompt_open_ = false;
+            pending_ = Action::None;
+            return;
+        }
+    }
+
+    modal_backdrop(ctx, kPromptTitle, width, height);
+    const mu_Rect rect = centered_rect(width, height, 460, 130);
+    if (mu_Container* cnt = mu_get_container(ctx, kPromptTitle)) cnt->rect = rect;
+    if (!mu_begin_window_ex(ctx, kPromptTitle, rect, MU_OPT_NOCLOSE | MU_OPT_NORESIZE | MU_OPT_NOSCROLL)) return;
+
+    const int full[] = {-1};
+    mu_layout_row(ctx, 1, full, 0);
+    const std::string question = "Save changes to " + display_name() + "?";
+    mu_label(ctx, question.c_str());
+    mu_label(ctx, "Your changes will be lost if you don't save them.");
+
+    const int widths[] = {-312, 100, 100, 100};
+    mu_layout_row(ctx, 4, widths, 0);
+    mu_label(ctx, "");
+    const bool save = mu_button(ctx, "Save") != 0;
+    const bool discard = mu_button(ctx, "Don't Save") != 0;
+    const bool cancel = mu_button(ctx, "Cancel") != 0;
+    mu_end_window(ctx);
+
+    if (save) {
+        prompt_open_ = false;
+        // Untitled buffers go through Save As; the pending action runs after.
+        if (save_file()) perform(pending_, pending_path_);
+    } else if (discard) {
+        prompt_open_ = false;
+        perform(pending_, pending_path_);
+    } else if (cancel) {
+        prompt_open_ = false;
+        pending_ = Action::None;
+    }
 }
 
 void Ide::toolbar(mu_Context* ctx) {
-    static const int widths[] = {70, 70, 90, 70, 70, 70, -1};
-    mu_layout_row(ctx, 7, widths, -1);
-    if (mu_button(ctx, "Open")) log("Open: pick a file in the explorer");
+    static const int widths[] = {56, 56, 56, 72, 10, 84, 56, 56, 56, -1};
+    mu_layout_row(ctx, 10, widths, -1);
+    if (mu_button(ctx, "New")) guarded(Action::New);
+    if (mu_button(ctx, "Open")) file_dialog_.open(FileDialog::Mode::Open, cwd_);
     if (mu_button(ctx, "Save")) save_file();
+    if (mu_button(ctx, "Save As")) save_as();
+    mu_label(ctx, "");
     if (mu_button(ctx, "Assemble")) log("Assemble: not implemented yet");
     if (mu_button(ctx, "Run")) log("Run: not implemented yet");
     if (mu_button(ctx, "Step")) log("Step: not implemented yet");
     if (mu_button(ctx, "Stop")) log("Stop: not implemented yet");
-    std::string title = file_path_.empty() ? "untitled" : file_path_.filename().string();
+    std::string title = display_name();
     if (editor_.modified()) title += " *";
     mu_label(ctx, title.c_str());
 }
@@ -181,14 +336,16 @@ void Ide::explorer(mu_Context* ctx) {
 
     // Mutate after iterating so entries_ is not invalidated mid-loop.
     if (!navigate.empty()) change_directory(navigate);
-    if (!open.empty()) request_open(open);
+    if (!open.empty()) guarded(Action::Open, open);
 }
 
 void Ide::editor(mu_Context* ctx, const FrameInput& input) {
     const int full[] = {-1};
+    find_bar_.update(ctx, input, editor_);
+
     const int status_h = ctx->text_height(ctx->style->font);
     mu_layout_row(ctx, 1, full, -(status_h + ctx->style->spacing + 1));
-    if (editor_.update(ctx, input, fonts_.mono())) save_file();
+    editor_.update(ctx, input, fonts_.mono());
 
     char status[128];
     const TextPos cur = editor_.cursor();

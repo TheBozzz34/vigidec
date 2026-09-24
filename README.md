@@ -46,7 +46,17 @@ Run the editor unit tests (no GPU needed) with `ctest --preset debug`.
 | Tab / Shift+Tab | Indent / unindent (selected lines) |
 | Ctrl+D | Duplicate line or selection |
 | Ctrl+Backspace / Ctrl+Delete | Delete word |
-| Ctrl+S | Save |
+| Ctrl+N, Ctrl+O | New file, open file |
+| Ctrl+S, Ctrl+Shift+S | Save, save as |
+| Ctrl+F, Ctrl+H | Find, find and replace |
+| F3 / Shift+F3, Enter / Shift+Enter in the find field | Next / previous match |
+| Ctrl+G | Go to line |
+| Escape | Close the find bar or dialog |
+
+Find supports match case (`Aa`), whole word (`W`) and ECMAScript regular
+expressions (`.*`); regex replacements can use `$1`, `$&` etc. Replace All
+is a single undo step. New, Open and closing the window ask before
+discarding unsaved changes.
 
 On macOS, Cmd replaces Ctrl. Syntax highlighting covers VIG assembly
 (`.vigas`) and C (`.c`/`.h`, for vigcc).
@@ -66,7 +76,11 @@ src/render/vk_context.*   instance, device, swapchain, frame sync
 src/render/font.*         FreeType fonts, glyph atlas (grows on demand)
 src/render/ui_renderer.*  microui command list -> Vulkan draws
 src/editor/               text buffer, syntax highlighting, editor widget
-src/ui/ide.*              IDE panels (explorer, editor, VM, output)
+src/editor/search.*       find / replace engine (plain, whole word, regex)
+src/ui/ide.*              IDE shell: panels, shortcuts, unsaved-changes flow
+src/ui/find_bar.*         find / replace / go-to-line bar
+src/ui/file_dialog.*      Open / Save As dialog
+src/ui/widgets.*          small microui helpers (textbox paste, modals, ...)
 tests/                    editor core unit tests
 ```
 

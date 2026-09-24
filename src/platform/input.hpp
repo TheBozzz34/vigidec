@@ -9,8 +9,8 @@ namespace vig {
 enum class Key {
     Left, Right, Up, Down,
     Home, End, PageUp, PageDown,
-    Backspace, Delete, Enter, Tab, Escape,
-    A, C, D, S, V, X, Y, Z,
+    Backspace, Delete, Enter, Tab, Escape, F3,
+    A, C, D, F, G, H, N, O, S, V, X, Y, Z,
 };
 
 struct KeyEvent {

@@ -2,6 +2,8 @@
 
 #include "editor/text_editor.hpp"
 #include "platform/input.hpp"
+#include "ui/file_dialog.hpp"
+#include "ui/find_bar.hpp"
 
 #include <filesystem>
 #include <string>
@@ -13,33 +15,52 @@ namespace vig {
 
 class FontSystem;
 
-// Top-level IDE UI. Holds editor/explorer state and lays out the panels
-// every frame. The VM integration is still to come; the VM panel and the
-// toolbar build/run actions are placeholders.
+// Top-level IDE UI. Holds editor/explorer state, routes global shortcuts
+// and lays out the panels every frame. The VM integration is still to
+// come; the VM panel and the build/run toolbar actions are placeholders.
 class Ide {
 public:
     explicit Ide(FontSystem& fonts);
 
     void frame(mu_Context* ctx, const FrameInput& input, int width, int height);
 
+    // Window close button: quits, or asks about unsaved changes first.
+    void request_quit();
+    bool should_quit() const { return quit_; }
+
     void log(std::string line);
-    void open_file(const std::filesystem::path& path);
-    void save_file();
 
 private:
+    enum class Action { None, New, Open, Quit };
+
     struct Entry {
         std::string name;
         bool is_dir;
     };
+
+    // Shortcuts that work regardless of focus. Returns the input left over
+    // for the focused widget.
+    FrameInput route_shortcuts(const FrameInput& input);
 
     void toolbar(mu_Context* ctx);
     void explorer(mu_Context* ctx);
     void editor(mu_Context* ctx, const FrameInput& input);
     void vm_panel(mu_Context* ctx);
     void output(mu_Context* ctx);
+    void unsaved_prompt(mu_Context* ctx, const FrameInput& input, int width, int height);
+
+    // Runs `action` now, or first asks what to do with unsaved changes.
+    void guarded(Action action, const std::filesystem::path& path = {});
+    void perform(Action action, const std::filesystem::path& path);
+
+    void new_file();
+    bool open_file(const std::filesystem::path& path);
+    bool save_file();  // falls back to Save As for untitled buffers
+    void save_as();
+    bool write_file(const std::filesystem::path& path);
+    std::string display_name() const;
 
     void change_directory(const std::filesystem::path& dir);
-    void request_open(const std::filesystem::path& path);
 
     FontSystem& fonts_;
 
@@ -48,7 +69,14 @@ private:
 
     std::filesystem::path file_path_;
     TextEditor editor_;
-    std::filesystem::path pending_open_;  // waiting for "discard changes?" confirmation
+    FindBar find_bar_;
+    FileDialog file_dialog_;
+
+    // An action waiting on the unsaved-changes prompt (or on Save As).
+    Action pending_ = Action::None;
+    std::filesystem::path pending_path_;
+    bool prompt_open_ = false;
+    bool quit_ = false;
 
     std::vector<std::string> log_;
     int scroll_log_frames_ = 0;  // keep pinning to the bottom until layout catches up
