@@ -4,6 +4,8 @@
 #include "ui/mu.h"
 
 #include <cstdio>
+#include <cstring>
+#include <optional>
 #include <stdexcept>
 
 namespace vig {
@@ -40,6 +42,43 @@ int map_key(int key) {
     }
 }
 
+std::optional<Key> map_editor_key(int key) {
+    switch (key) {
+        case GLFW_KEY_LEFT: return Key::Left;
+        case GLFW_KEY_RIGHT: return Key::Right;
+        case GLFW_KEY_UP: return Key::Up;
+        case GLFW_KEY_DOWN: return Key::Down;
+        case GLFW_KEY_HOME: return Key::Home;
+        case GLFW_KEY_END: return Key::End;
+        case GLFW_KEY_PAGE_UP: return Key::PageUp;
+        case GLFW_KEY_PAGE_DOWN: return Key::PageDown;
+        case GLFW_KEY_BACKSPACE: return Key::Backspace;
+        case GLFW_KEY_DELETE: return Key::Delete;
+        case GLFW_KEY_ENTER:
+        case GLFW_KEY_KP_ENTER: return Key::Enter;
+        case GLFW_KEY_TAB: return Key::Tab;
+        case GLFW_KEY_ESCAPE: return Key::Escape;
+        case GLFW_KEY_A: return Key::A;
+        case GLFW_KEY_C: return Key::C;
+        case GLFW_KEY_D: return Key::D;
+        case GLFW_KEY_S: return Key::S;
+        case GLFW_KEY_V: return Key::V;
+        case GLFW_KEY_X: return Key::X;
+        case GLFW_KEY_Y: return Key::Y;
+        case GLFW_KEY_Z: return Key::Z;
+        default: return std::nullopt;
+    }
+}
+
+std::string get_clipboard(void* user) {
+    const char* s = glfwGetClipboardString(static_cast<GLFWwindow*>(user));
+    return s ? std::string(s) : std::string();
+}
+
+void set_clipboard(void* user, const std::string& text) {
+    glfwSetClipboardString(static_cast<GLFWwindow*>(user), text.c_str());
+}
+
 }  // namespace
 
 Window::Window(const char* title, int width, int height) {
@@ -64,6 +103,10 @@ Window::Window(const char* title, int width, int height) {
     glfwSetKeyCallback(window_, on_key);
     glfwSetCharCallback(window_, on_char);
     glfwSetFramebufferSizeCallback(window_, on_framebuffer_size);
+
+    input_.get_clipboard = get_clipboard;
+    input_.set_clipboard = set_clipboard;
+    input_.clipboard_user = window_;
 }
 
 Window::~Window() {
@@ -72,7 +115,10 @@ Window::~Window() {
 }
 
 void Window::poll_events() {
+    input_.keys.clear();
+    input_.text.clear();
     glfwPollEvents();
+    input_.time = glfwGetTime();
     int w = 0, h = 0;
     glfwGetFramebufferSize(window_, &w, &h);
     while ((w == 0 || h == 0) && !glfwWindowShouldClose(window_)) {
@@ -120,8 +166,23 @@ void Window::on_scroll(GLFWwindow* w, double dx, double dy) {
     if (mu_Context* ui = from(w)->ui_) mu_input_scroll(ui, int(dx * -30.0), int(dy * -30.0));
 }
 
-void Window::on_key(GLFWwindow* w, int key, int, int action, int) {
-    mu_Context* ui = from(w)->ui_;
+void Window::on_key(GLFWwindow* w, int key, int, int action, int mods) {
+    Window* self = from(w);
+    if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+        if (std::optional<Key> k = map_editor_key(key)) {
+            KeyEvent ev{*k};
+            ev.shift = (mods & GLFW_MOD_SHIFT) != 0;
+#ifdef __APPLE__
+            ev.ctrl = (mods & GLFW_MOD_SUPER) != 0;
+#else
+            ev.ctrl = (mods & GLFW_MOD_CONTROL) != 0;
+#endif
+            ev.alt = (mods & GLFW_MOD_ALT) != 0;
+            self->input_.keys.push_back(ev);
+        }
+    }
+
+    mu_Context* ui = self->ui_;
     int k = map_key(key);
     if (!ui || !k) return;
     if (action == GLFW_PRESS || action == GLFW_REPEAT) {
@@ -134,8 +195,7 @@ void Window::on_key(GLFWwindow* w, int key, int, int action, int) {
 }
 
 void Window::on_char(GLFWwindow* w, unsigned int cp) {
-    mu_Context* ui = from(w)->ui_;
-    if (!ui) return;
+    Window* self = from(w);
     char buf[5] = {};
     if (cp < 0x80) {
         buf[0] = char(cp);
@@ -152,7 +212,11 @@ void Window::on_char(GLFWwindow* w, unsigned int cp) {
         buf[2] = char(0x80 | ((cp >> 6) & 0x3F));
         buf[3] = char(0x80 | (cp & 0x3F));
     }
-    mu_input_text(ui, buf);
+    self->input_.text += buf;
+
+    // microui's per-frame text buffer is small and asserts on overflow.
+    mu_Context* ui = self->ui_;
+    if (ui && std::strlen(ui->input_text) + std::strlen(buf) < sizeof(ui->input_text)) mu_input_text(ui, buf);
 }
 
 void Window::on_framebuffer_size(GLFWwindow* w, int, int) { from(w)->resized_ = true; }
