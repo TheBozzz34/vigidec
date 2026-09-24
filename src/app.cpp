@@ -1,5 +1,6 @@
 #include "app.hpp"
 
+#include "platform/file_dialogs.hpp"
 #include "platform/window.hpp"
 #include "render/font.hpp"
 #include "render/ui_renderer.hpp"
@@ -56,7 +57,8 @@ int run_app() {
     apply_style(ui.get(), fonts);
     window.attach(ui.get());
 
-    Ide ide(fonts);
+    NativeFileDialogs dialogs(window.handle());
+    Ide ide(fonts, dialogs);
     const VkClearColorValue clear{{0.09f, 0.09f, 0.10f, 1.0f}};
 
     while (!ide.should_quit()) {

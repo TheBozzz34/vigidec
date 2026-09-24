@@ -2,7 +2,6 @@
 
 #include "editor/text_editor.hpp"
 #include "platform/input.hpp"
-#include "ui/file_dialog.hpp"
 #include "ui/find_bar.hpp"
 
 #include <filesystem>
@@ -14,13 +13,14 @@ struct mu_Context;
 namespace vig {
 
 class FontSystem;
+class NativeFileDialogs;
 
 // Top-level IDE UI. Holds editor/explorer state, routes global shortcuts
 // and lays out the panels every frame. The VM integration is still to
 // come; the VM panel and the build/run toolbar actions are placeholders.
 class Ide {
 public:
-    explicit Ide(FontSystem& fonts);
+    Ide(FontSystem& fonts, NativeFileDialogs& dialogs);
 
     void frame(mu_Context* ctx, const FrameInput& input, int width, int height);
 
@@ -32,6 +32,7 @@ public:
 
 private:
     enum class Action { None, New, Open, Quit };
+    enum class DialogRequest { None, Open, SaveAs };
 
     struct Entry {
         std::string name;
@@ -57,12 +58,16 @@ private:
     bool open_file(const std::filesystem::path& path);
     bool save_file();  // falls back to Save As for untitled buffers
     void save_as();
+    // Native dialogs block, so they run at the start of the next frame
+    // rather than in the middle of laying out the UI.
+    void run_dialog(mu_Context* ctx);
     bool write_file(const std::filesystem::path& path);
     std::string display_name() const;
 
     void change_directory(const std::filesystem::path& dir);
 
     FontSystem& fonts_;
+    NativeFileDialogs& dialogs_;
 
     std::filesystem::path cwd_;
     std::vector<Entry> entries_;
@@ -70,7 +75,7 @@ private:
     std::filesystem::path file_path_;
     TextEditor editor_;
     FindBar find_bar_;
-    FileDialog file_dialog_;
+    DialogRequest dialog_request_ = DialogRequest::None;
 
     // An action waiting on the unsaved-changes prompt (or on Save As).
     Action pending_ = Action::None;

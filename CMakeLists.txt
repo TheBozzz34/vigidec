@@ -34,6 +34,7 @@ add_executable(vigide
     src/main.cpp
     src/app.cpp
     src/platform/window.cpp
+    src/platform/file_dialogs.cpp
     src/render/vk_context.cpp
     src/render/ui_renderer.cpp
     src/render/font.cpp
@@ -44,7 +45,6 @@ add_executable(vigide
     src/ui/microui_icons.c
     src/ui/widgets.cpp
     src/ui/find_bar.cpp
-    src/ui/file_dialog.cpp
     src/ui/ide.cpp)
 
 vigide_embed_files(vigide
@@ -64,6 +64,7 @@ target_link_libraries(vigide PRIVATE
     microui
     glfw
     freetype
+    nfd
     Vulkan::Vulkan)
 
 target_compile_definitions(vigide PRIVATE

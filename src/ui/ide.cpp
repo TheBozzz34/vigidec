@@ -1,5 +1,6 @@
 #include "ui/ide.hpp"
 
+#include "platform/file_dialogs.hpp"
 #include "render/font.hpp"
 #include "ui/mu.h"
 #include "ui/widgets.hpp"
@@ -46,7 +47,7 @@ bool begin_docked(mu_Context* ctx, const char* title, mu_Rect rect, int opts = k
 
 }  // namespace
 
-Ide::Ide(FontSystem& fonts) : fonts_(fonts) {
+Ide::Ide(FontSystem& fonts, NativeFileDialogs& dialogs) : fonts_(fonts), dialogs_(dialogs) {
     std::error_code ec;
     fs::path start = fs::current_path(ec);
     change_directory(ec ? fs::path(".") : start);
@@ -129,10 +130,45 @@ bool Ide::save_file() {
     return write_file(file_path_);
 }
 
-void Ide::save_as() {
-    const fs::path dir = file_path_.empty() ? cwd_ : file_path_.parent_path();
-    const std::string name = file_path_.empty() ? "untitled.vigas" : file_path_.filename().string();
-    file_dialog_.open(FileDialog::Mode::Save, dir, name);
+void Ide::save_as() { dialog_request_ = DialogRequest::SaveAs; }
+
+void Ide::run_dialog(mu_Context* ctx) {
+    const DialogRequest request = dialog_request_;
+    dialog_request_ = DialogRequest::None;
+
+    std::optional<fs::path> chosen;
+    if (request == DialogRequest::SaveAs) {
+        const fs::path dir = file_path_.empty() ? cwd_ : file_path_.parent_path();
+        const std::string name = file_path_.empty() ? "untitled.vigas" : file_path_.filename().string();
+        chosen = dialogs_.save_file(dir, name);
+    } else {
+        chosen = dialogs_.open_file(cwd_);
+    }
+
+    // The dialog swallowed the button/key releases for our window; don't
+    // leave microui thinking they're still held.
+    ctx->mouse_down = 0;
+    ctx->key_down = 0;
+
+    if (!chosen) {
+        if (!dialogs_.error().empty()) log("File dialog: " + dialogs_.error());
+        pending_ = Action::None;  // e.g. Save As from the unsaved-changes prompt was cancelled
+        return;
+    }
+
+    if (request == DialogRequest::SaveAs) {
+        if (write_file(*chosen)) {
+            file_path_ = *chosen;
+            editor_.set_language(language_for_path(chosen->string()));
+            if (chosen->parent_path() == cwd_) change_directory(cwd_);
+            if (pending_ != Action::None) perform(pending_, pending_path_);
+        } else {
+            pending_ = Action::None;
+        }
+    } else {
+        guarded(Action::Open, *chosen);
+    }
+    editor_.request_focus();
 }
 
 void Ide::guarded(Action action, const fs::path& path) {
@@ -156,7 +192,7 @@ void Ide::perform(Action action, const fs::path& path) {
 }
 
 void Ide::request_quit() {
-    if (!prompt_open_ && !file_dialog_.is_open()) guarded(Action::Quit);
+    if (!prompt_open_) guarded(Action::Quit);
 }
 
 // --- Frame ----------------------------------------------------------------------
@@ -165,8 +201,8 @@ FrameInput Ide::route_shortcuts(const FrameInput& input) {
     FrameInput rest = input;
     rest.keys.clear();
 
-    // While a dialog is up it owns the keyboard (it reads `input` itself).
-    if (prompt_open_ || file_dialog_.is_open()) {
+    // While the prompt is up it owns the keyboard (it reads `input` itself).
+    if (prompt_open_) {
         rest.text.clear();
         return rest;
     }
@@ -175,7 +211,7 @@ FrameInput Ide::route_shortcuts(const FrameInput& input) {
         if (ev.ctrl) {
             switch (ev.key) {
                 case Key::N: guarded(Action::New); continue;
-                case Key::O: file_dialog_.open(FileDialog::Mode::Open, cwd_); continue;
+                case Key::O: dialog_request_ = DialogRequest::Open; continue;
                 case Key::S:
                     if (ev.shift) {
                         save_as();
@@ -211,6 +247,7 @@ FrameInput Ide::route_shortcuts(const FrameInput& input) {
 }
 
 void Ide::frame(mu_Context* ctx, const FrameInput& input, int width, int height) {
+    if (dialog_request_ != DialogRequest::None) run_dialog(ctx);
     const FrameInput widget_input = route_shortcuts(input);
 
     const int body_h = std::max(0, height - kToolbarHeight - kOutputHeight);
@@ -240,21 +277,6 @@ void Ide::frame(mu_Context* ctx, const FrameInput& input, int width, int height)
     }
 
     // Modals last, on top of everything.
-    if (std::optional<fs::path> chosen = file_dialog_.update(ctx, input, width, height)) {
-        if (file_dialog_.mode() == FileDialog::Mode::Save) {
-            if (write_file(*chosen)) {
-                file_path_ = *chosen;
-                editor_.set_language(language_for_path(chosen->string()));
-                if (chosen->parent_path() == cwd_) change_directory(cwd_);
-                if (pending_ != Action::None) perform(pending_, pending_path_);
-            }
-        } else {
-            guarded(Action::Open, *chosen);
-        }
-        editor_.request_focus();
-    } else if (!file_dialog_.is_open() && pending_ != Action::None && !prompt_open_) {
-        pending_ = Action::None;  // Save As was cancelled: drop the pending action
-    }
     if (prompt_open_) unsaved_prompt(ctx, input, width, height);
 }
 
@@ -303,7 +325,7 @@ void Ide::toolbar(mu_Context* ctx) {
     static const int widths[] = {56, 56, 56, 72, 10, 84, 56, 56, 56, -1};
     mu_layout_row(ctx, 10, widths, -1);
     if (mu_button(ctx, "New")) guarded(Action::New);
-    if (mu_button(ctx, "Open")) file_dialog_.open(FileDialog::Mode::Open, cwd_);
+    if (mu_button(ctx, "Open")) dialog_request_ = DialogRequest::Open;
     if (mu_button(ctx, "Save")) save_file();
     if (mu_button(ctx, "Save As")) save_as();
     mu_label(ctx, "");
