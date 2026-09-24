@@ -1,5 +1,6 @@
 #include "ui/ide.hpp"
 
+#include "render/font.hpp"
 #include "ui/mu.h"
 
 #include <algorithm>
@@ -23,7 +24,8 @@ constexpr int kPanelOpts = MU_OPT_NOCLOSE | MU_OPT_NORESIZE;
 constexpr const char* kWelcome =
     "# Welcome to the VIG IDE.\n"
     "#\n"
-    "# Open a .vigas file from the explorer on the left.\n"
+    "# Open a .vigas file from the explorer on the left, or start typing.\n"
+    "# Ctrl+S saves, Ctrl+Z / Ctrl+Y undo and redo.\n"
     "# Assembling, running and debugging programs on the VIG VM\n"
     "# will be wired up here.\n"
     "\n"
@@ -34,23 +36,6 @@ constexpr const char* kWelcome =
     "    print\n"
     "    halt\n";
 
-std::vector<std::string> split_lines(const std::string& text) {
-    std::vector<std::string> lines;
-    std::string line;
-    for (char c : text) {
-        if (c == '\n') {
-            lines.push_back(std::move(line));
-            line.clear();
-        } else if (c == '\t') {
-            line.append(4, ' ');  // the atlas font has no tab glyph
-        } else if (c != '\r') {
-            line.push_back(c);
-        }
-    }
-    if (!line.empty()) lines.push_back(std::move(line));
-    return lines;
-}
-
 // Opens (or keeps) a window pinned to `rect`, ignoring user drags/resizes.
 bool begin_docked(mu_Context* ctx, const char* title, mu_Rect rect, int opts = kPanelOpts) {
     if (mu_Container* cnt = mu_get_container(ctx, title)) cnt->rect = rect;
@@ -59,11 +44,13 @@ bool begin_docked(mu_Context* ctx, const char* title, mu_Rect rect, int opts = k
 
 }  // namespace
 
-Ide::Ide() {
+Ide::Ide(FontSystem& fonts) : fonts_(fonts) {
     std::error_code ec;
     fs::path start = fs::current_path(ec);
     change_directory(ec ? fs::path(".") : start);
-    lines_ = split_lines(kWelcome);
+    editor_.set_text(kWelcome);
+    editor_.set_language(Language::VigAsm);
+    editor_.request_focus();
     log("VIG IDE " VIGIDE_VERSION);
 }
 
@@ -100,12 +87,39 @@ void Ide::open_file(const fs::path& path) {
         return;
     }
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    lines_ = split_lines(text);
+    editor_.set_text(text);
+    editor_.set_language(language_for_path(path.string()));
+    editor_.request_focus();
     file_path_ = path;
+    pending_open_.clear();
     log("Opened " + path.string());
 }
 
-void Ide::frame(mu_Context* ctx, int width, int height) {
+void Ide::request_open(const fs::path& path) {
+    if (editor_.modified() && pending_open_ != path) {
+        pending_open_ = path;
+        log("Unsaved changes - save first, or click " + path.filename().string() + " again to discard them");
+        return;
+    }
+    open_file(path);
+}
+
+void Ide::save_file() {
+    if (file_path_.empty()) {
+        log("Save: nothing to save to yet - open a file first (Save As is not implemented)");
+        return;
+    }
+    std::ofstream out(file_path_, std::ios::binary | std::ios::trunc);
+    const std::string text = editor_.text();
+    if (!out || !out.write(text.data(), std::streamsize(text.size()))) {
+        log("Failed to save " + file_path_.string());
+        return;
+    }
+    editor_.mark_saved();
+    log("Saved " + file_path_.string());
+}
+
+void Ide::frame(mu_Context* ctx, const FrameInput& input, int width, int height) {
     const int body_h = std::max(0, height - kToolbarHeight - kOutputHeight);
     const int editor_w = std::max(0, width - kExplorerWidth - kVmPanelWidth);
 
@@ -118,8 +132,9 @@ void Ide::frame(mu_Context* ctx, int width, int height) {
         explorer(ctx);
         mu_end_window(ctx);
     }
-    if (begin_docked(ctx, "Editor", mu_rect(kExplorerWidth, kToolbarHeight, editor_w, body_h))) {
-        editor(ctx);
+    if (begin_docked(ctx, "Editor", mu_rect(kExplorerWidth, kToolbarHeight, editor_w, body_h),
+                     kPanelOpts | MU_OPT_NOSCROLL)) {
+        editor(ctx, input);
         mu_end_window(ctx);
     }
     if (begin_docked(ctx, "VM", mu_rect(kExplorerWidth + editor_w, kToolbarHeight, kVmPanelWidth, body_h))) {
@@ -136,12 +151,14 @@ void Ide::toolbar(mu_Context* ctx) {
     static const int widths[] = {70, 70, 90, 70, 70, 70, -1};
     mu_layout_row(ctx, 7, widths, -1);
     if (mu_button(ctx, "Open")) log("Open: pick a file in the explorer");
-    if (mu_button(ctx, "Save")) log("Save: not implemented yet");
+    if (mu_button(ctx, "Save")) save_file();
     if (mu_button(ctx, "Assemble")) log("Assemble: not implemented yet");
     if (mu_button(ctx, "Run")) log("Run: not implemented yet");
     if (mu_button(ctx, "Step")) log("Step: not implemented yet");
     if (mu_button(ctx, "Stop")) log("Stop: not implemented yet");
-    mu_label(ctx, file_path_.empty() ? "untitled" : file_path_.filename().string().c_str());
+    std::string title = file_path_.empty() ? "untitled" : file_path_.filename().string();
+    if (editor_.modified()) title += " *";
+    mu_label(ctx, title.c_str());
 }
 
 void Ide::explorer(mu_Context* ctx) {
@@ -164,19 +181,22 @@ void Ide::explorer(mu_Context* ctx) {
 
     // Mutate after iterating so entries_ is not invalidated mid-loop.
     if (!navigate.empty()) change_directory(navigate);
-    if (!open.empty()) open_file(open);
+    if (!open.empty()) request_open(open);
 }
 
-void Ide::editor(mu_Context* ctx) {
-    // Read-only listing for now; a proper text editing widget comes next.
-    char gutter[24];
-    const int widths[] = {48, -1};
-    mu_layout_row(ctx, 2, widths, 0);
-    for (size_t i = 0; i < lines_.size(); ++i) {
-        std::snprintf(gutter, sizeof gutter, "%5zu", i + 1);
-        mu_label(ctx, gutter);
-        mu_label(ctx, lines_[i].c_str());
-    }
+void Ide::editor(mu_Context* ctx, const FrameInput& input) {
+    const int full[] = {-1};
+    const int status_h = ctx->text_height(ctx->style->font);
+    mu_layout_row(ctx, 1, full, -(status_h + ctx->style->spacing + 1));
+    if (editor_.update(ctx, input, fonts_.mono())) save_file();
+
+    char status[128];
+    const TextPos cur = editor_.cursor();
+    std::snprintf(status, sizeof status, "Ln %d, Col %d    %d lines    %s%s", cur.line + 1,
+                  editor_.visual_column(cur) + 1, editor_.line_count(), language_name(editor_.language()),
+                  editor_.modified() ? "    modified" : "");
+    mu_layout_row(ctx, 1, full, status_h);
+    mu_label(ctx, status);
 }
 
 void Ide::vm_panel(mu_Context* ctx) {
@@ -200,8 +220,11 @@ void Ide::vm_panel(mu_Context* ctx) {
 
 void Ide::output(mu_Context* ctx) {
     const int full[] = {-1};
-    mu_layout_row(ctx, 1, full, 0);
+    mu_Font previous = ctx->style->font;
+    ctx->style->font = &fonts_.mono();
+    mu_layout_row(ctx, 1, full, ctx->text_height(ctx->style->font));
     for (const std::string& line : log_) mu_label(ctx, line.c_str());
+    ctx->style->font = previous;
 
     if (scroll_log_frames_ > 0) {
         // microui clamps this against the content height on the next frame.

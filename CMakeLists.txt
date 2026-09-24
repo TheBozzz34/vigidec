@@ -12,11 +12,13 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(VIGIDE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+option(VIGIDE_BUILD_TESTS "Build unit tests" ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(Dependencies)
 include(CompileShaders)
+include(EmbedFiles)
 
 # ---------------------------------------------------------------------------
 # Shaders (GLSL -> SPIR-V, embedded into the executable)
@@ -34,11 +36,19 @@ add_executable(vigide
     src/platform/window.cpp
     src/render/vk_context.cpp
     src/render/ui_renderer.cpp
-    src/ui/atlas.c
+    src/render/font.cpp
+    src/editor/text_buffer.cpp
+    src/editor/highlight.cpp
+    src/editor/text_editor.cpp
+    src/ui/microui_icons.c
     src/ui/ide.cpp)
 
+vigide_embed_files(vigide
+    vigide_font_mono assets/fonts/JetBrainsMono-Regular.ttf
+    vigide_font_ui   assets/fonts/Inter-Regular.ttf)
+
 target_include_directories(vigide PRIVATE src)
-set_source_files_properties(src/ui/atlas.c PROPERTIES
+set_source_files_properties(src/ui/microui_icons.c PROPERTIES
     INCLUDE_DIRECTORIES "${VIGIDE_MICROUI_ATLAS_DIR}")
 target_compile_features(vigide PRIVATE cxx_std_20 c_std_11)
 set_target_properties(vigide PROPERTIES
@@ -49,6 +59,7 @@ target_link_libraries(vigide PRIVATE
     vigide_shaders
     microui
     glfw
+    freetype
     Vulkan::Vulkan)
 
 target_compile_definitions(vigide PRIVATE
@@ -64,6 +75,20 @@ else()
     target_compile_options(vigide PRIVATE -Wall -Wextra -Wpedantic
         -Wno-missing-field-initializers  # Vulkan `Info info{sType}` idiom
         $<$<BOOL:${VIGIDE_WARNINGS_AS_ERRORS}>:-Werror>)
+endif()
+
+# ---------------------------------------------------------------------------
+# Tests (editor core only; no window or GPU required)
+# ---------------------------------------------------------------------------
+if(VIGIDE_BUILD_TESTS)
+    enable_testing()
+    add_executable(vigide_editor_tests
+        tests/editor_tests.cpp
+        src/editor/text_buffer.cpp
+        src/editor/highlight.cpp)
+    target_include_directories(vigide_editor_tests PRIVATE src)
+    target_compile_features(vigide_editor_tests PRIVATE cxx_std_20)
+    add_test(NAME editor COMMAND vigide_editor_tests)
 endif()
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT vigide)

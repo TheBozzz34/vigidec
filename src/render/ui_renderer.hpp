@@ -9,11 +9,14 @@ struct mu_Context;
 
 namespace vig {
 
+class FontSystem;
+
 // Draws a microui command list with Vulkan: one textured-quad pipeline over
-// the microui atlas, with clip commands mapped to scissor rectangles.
+// the shared glyph/icon atlas, with clip commands mapped to scissor rects.
+// mu_Font values must be vig::Font pointers.
 class UiRenderer {
 public:
-    explicit UiRenderer(VulkanContext& vk);
+    UiRenderer(VulkanContext& vk, FontSystem& fonts);
     ~UiRenderer();
 
     UiRenderer(const UiRenderer&) = delete;
@@ -42,16 +45,22 @@ private:
         VkDeviceSize capacity = 0;  // in vertices
     };
 
-    void create_atlas();
+    void create_sampler_and_descriptors();
     void create_pipeline();
+    void upload_atlas();
+    void destroy_atlas_image();
     void ensure_capacity(VertexBuffer& vb, size_t vertices);
     void destroy_buffer(VertexBuffer& vb);
 
     VulkanContext& vk_;
+    FontSystem& fonts_;
 
     VkImage atlas_image_ = VK_NULL_HANDLE;
     VkDeviceMemory atlas_memory_ = VK_NULL_HANDLE;
     VkImageView atlas_view_ = VK_NULL_HANDLE;
+    int atlas_width_ = 0;
+    int atlas_height_ = 0;
+    uint64_t atlas_version_ = 0;
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;

@@ -2,7 +2,7 @@
 
 #include "shaders/ui.frag.h"
 #include "shaders/ui.vert.h"
-#include "ui/atlas.h"
+#include "render/font.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -34,9 +34,10 @@ uint32_t pack_color(mu_Color c) {
 
 }  // namespace
 
-UiRenderer::UiRenderer(VulkanContext& vk) : vk_(vk) {
-    create_atlas();
+UiRenderer::UiRenderer(VulkanContext& vk, FontSystem& fonts) : vk_(vk), fonts_(fonts) {
+    create_sampler_and_descriptors();
     create_pipeline();
+    upload_atlas();
 }
 
 UiRenderer::~UiRenderer() {
@@ -48,38 +49,75 @@ UiRenderer::~UiRenderer() {
     vkDestroyDescriptorPool(device, descriptor_pool_, nullptr);
     vkDestroyDescriptorSetLayout(device, set_layout_, nullptr);
     vkDestroySampler(device, sampler_, nullptr);
-    vkDestroyImageView(device, atlas_view_, nullptr);
-    vkDestroyImage(device, atlas_image_, nullptr);
-    vkFreeMemory(device, atlas_memory_, nullptr);
+    destroy_atlas_image();
 }
 
-void UiRenderer::create_atlas() {
+void UiRenderer::destroy_atlas_image() {
     VkDevice device = vk_.device();
-    const uint32_t width = static_cast<uint32_t>(vig_atlas_width());
-    const uint32_t height = static_cast<uint32_t>(vig_atlas_height());
-    const VkDeviceSize size = VkDeviceSize(width) * height;
+    if (atlas_view_) vkDestroyImageView(device, atlas_view_, nullptr);
+    if (atlas_image_) vkDestroyImage(device, atlas_image_, nullptr);
+    if (atlas_memory_) vkFreeMemory(device, atlas_memory_, nullptr);
+    atlas_view_ = VK_NULL_HANDLE;
+    atlas_image_ = VK_NULL_HANDLE;
+    atlas_memory_ = VK_NULL_HANDLE;
+}
 
-    // Device-local image.
-    VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    image_info.imageType = VK_IMAGE_TYPE_2D;
-    image_info.format = VK_FORMAT_R8_UNORM;
-    image_info.extent = {width, height, 1};
-    image_info.mipLevels = 1;
-    image_info.arrayLayers = 1;
-    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
-    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VK_CHECK(vkCreateImage(device, &image_info, nullptr, &atlas_image_));
+void UiRenderer::upload_atlas() {
+    const GlyphAtlas& atlas = fonts_.atlas();
+    if (atlas.version() == atlas_version_) return;
+
+    // Glyphs are added rarely (first use of a character), so a full,
+    // synchronous re-upload keeps this simple. Waiting for idle also makes
+    // it safe to replace the image that in-flight frames sample.
+    vk_.wait_idle();
+
+    VkDevice device = vk_.device();
+    const uint32_t width = static_cast<uint32_t>(atlas.width());
+    const uint32_t height = static_cast<uint32_t>(atlas.height());
+    const VkDeviceSize size = VkDeviceSize(width) * height;
+    const bool recreate = atlas.width() != atlas_width_ || atlas.height() != atlas_height_;
 
     VkMemoryRequirements req;
-    vkGetImageMemoryRequirements(device, atlas_image_, &req);
     VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    alloc.allocationSize = req.size;
-    alloc.memoryTypeIndex = vk_.find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    VK_CHECK(vkAllocateMemory(device, &alloc, nullptr, &atlas_memory_));
-    VK_CHECK(vkBindImageMemory(device, atlas_image_, atlas_memory_, 0));
+
+    if (recreate) {
+        destroy_atlas_image();
+
+        VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = VK_FORMAT_R8_UNORM;
+        image_info.extent = {width, height, 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VK_CHECK(vkCreateImage(device, &image_info, nullptr, &atlas_image_));
+
+        vkGetImageMemoryRequirements(device, atlas_image_, &req);
+        alloc.allocationSize = req.size;
+        alloc.memoryTypeIndex = vk_.find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VK_CHECK(vkAllocateMemory(device, &alloc, nullptr, &atlas_memory_));
+        VK_CHECK(vkBindImageMemory(device, atlas_image_, atlas_memory_, 0));
+
+        VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        view_info.image = atlas_image_;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = VK_FORMAT_R8_UNORM;
+        view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VK_CHECK(vkCreateImageView(device, &view_info, nullptr, &atlas_view_));
+
+        VkDescriptorImageInfo image{sampler_, atlas_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = descriptor_set_;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &image;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    }
 
     // Staging buffer.
     VkBuffer staging;
@@ -97,7 +135,7 @@ void UiRenderer::create_atlas() {
     VK_CHECK(vkBindBufferMemory(device, staging, staging_memory, 0));
     void* mapped;
     VK_CHECK(vkMapMemory(device, staging_memory, 0, size, 0, &mapped));
-    std::memcpy(mapped, vig_atlas_pixels(), size);
+    std::memcpy(mapped, atlas.pixels(), size);
     vkUnmapMemory(device, staging_memory);
 
     vk_.immediate_submit([&](VkCommandBuffer cmd) {
@@ -108,7 +146,7 @@ void UiRenderer::create_atlas() {
         barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // contents are fully rewritten
         barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                              nullptr, 1, &barrier);
@@ -129,14 +167,16 @@ void UiRenderer::create_atlas() {
     vkDestroyBuffer(device, staging, nullptr);
     vkFreeMemory(device, staging_memory, nullptr);
 
-    VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    view_info.image = atlas_image_;
-    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    view_info.format = VK_FORMAT_R8_UNORM;
-    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    VK_CHECK(vkCreateImageView(device, &view_info, nullptr, &atlas_view_));
+    atlas_width_ = atlas.width();
+    atlas_height_ = atlas.height();
+    atlas_version_ = atlas.version();
+}
 
-    // Nearest filtering keeps the bitmap font crisp.
+void UiRenderer::create_sampler_and_descriptors() {
+    VkDevice device = vk_.device();
+
+    // Glyphs are rasterised at framebuffer resolution and placed on whole
+    // pixels, so nearest filtering is exact.
     VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sampler_info.magFilter = VK_FILTER_NEAREST;
     sampler_info.minFilter = VK_FILTER_NEAREST;
@@ -146,10 +186,6 @@ void UiRenderer::create_atlas() {
     sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sampler_info.maxLod = 0.0f;
     VK_CHECK(vkCreateSampler(device, &sampler_info, nullptr, &sampler_));
-}
-
-void UiRenderer::create_pipeline() {
-    VkDevice device = vk_.device();
 
     VkDescriptorSetLayoutBinding binding{};
     binding.binding = 0;
@@ -173,15 +209,10 @@ void UiRenderer::create_pipeline() {
     set_alloc.descriptorSetCount = 1;
     set_alloc.pSetLayouts = &set_layout_;
     VK_CHECK(vkAllocateDescriptorSets(device, &set_alloc, &descriptor_set_));
+}
 
-    VkDescriptorImageInfo image{sampler_, atlas_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    write.dstSet = descriptor_set_;
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &image;
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+void UiRenderer::create_pipeline() {
+    VkDevice device = vk_.device();
 
     VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants)};
     VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -305,8 +336,6 @@ void UiRenderer::destroy_buffer(VertexBuffer& vb) {
 
 void UiRenderer::render(mu_Context* ctx, VkCommandBuffer cmd, float scale_x, float scale_y) {
     const VkExtent2D extent = vk_.extent();
-    const float inv_w = 1.0f / static_cast<float>(vig_atlas_width());
-    const float inv_h = 1.0f / static_cast<float>(vig_atlas_height());
 
     vertices_.clear();
     batches_.clear();
@@ -317,12 +346,11 @@ void UiRenderer::render(mu_Context* ctx, VkCommandBuffer cmd, float scale_x, flo
         uint32_t count = static_cast<uint32_t>(vertices_.size()) - first;
         if (count > 0) batches_.push_back({scissor, first, count});
     };
-    auto push_quad = [&](mu_Rect dst, mu_Rect src, mu_Color color) {
-        const float x0 = float(dst.x), y0 = float(dst.y);
-        const float x1 = float(dst.x + dst.w), y1 = float(dst.y + dst.h);
-        const float u0 = src.x * inv_w, v0 = src.y * inv_h;
-        const float u1 = (src.x + src.w) * inv_w, v1 = (src.y + src.h) * inv_h;
-        const uint32_t c = pack_color(color);
+    // UVs are collected in atlas pixels and normalised at the end, because
+    // drawing text may rasterise new glyphs and grow the atlas.
+    auto push_quad = [&](float x0, float y0, float x1, float y1, mu_Rect src, uint32_t c) {
+        const float u0 = float(src.x), v0 = float(src.y);
+        const float u1 = float(src.x + src.w), v1 = float(src.y + src.h);
         vertices_.push_back({x0, y0, u0, v0, c});
         vertices_.push_back({x1, y0, u1, v0, c});
         vertices_.push_back({x1, y1, u1, v1, c});
@@ -330,30 +358,42 @@ void UiRenderer::render(mu_Context* ctx, VkCommandBuffer cmd, float scale_x, flo
         vertices_.push_back({x1, y1, u1, v1, c});
         vertices_.push_back({x0, y1, u0, v1, c});
     };
+    auto push_rect = [&](mu_Rect dst, mu_Rect src, mu_Color color) {
+        push_quad(float(dst.x), float(dst.y), float(dst.x + dst.w), float(dst.y + dst.h), src, pack_color(color));
+    };
 
     mu_Command* command = nullptr;
     while (mu_next_command(ctx, &command)) {
         switch (command->type) {
             case MU_COMMAND_TEXT: {
-                mu_Rect dst{command->text.pos.x, command->text.pos.y, 0, 0};
-                for (const char* p = command->text.str; *p; ++p) {
-                    if ((*p & 0xc0) == 0x80) continue;
-                    mu_Rect src = vig_atlas_glyph(static_cast<unsigned char>(*p));
-                    dst.w = src.w;
-                    dst.h = src.h;
-                    push_quad(dst, src, command->text.color);
-                    dst.x += dst.w;
+                Font& font = *static_cast<Font*>(command->text.font);
+                const float inv = 1.0f / font.raster_scale();
+                const float ox = float(command->text.pos.x);
+                const float oy = float(command->text.pos.y);
+                const uint32_t c = pack_color(command->text.color);
+                const char* p = command->text.str;
+                const char* end = p + std::strlen(p);
+                int pen = 0;  // raster pixels, keeps glyphs on whole pixels
+                while (p < end) {
+                    const Glyph& g = font.glyph(utf8_decode(p, end));
+                    if (g.width > 0) {
+                        const float x0 = ox + float(pen + g.left) * inv;
+                        const float y0 = oy + float(font.ascent_px() - g.top) * inv;
+                        push_quad(x0, y0, x0 + float(g.width) * inv, y0 + float(g.height) * inv,
+                                  mu_rect(g.atlas_x, g.atlas_y, g.width, g.height), c);
+                    }
+                    pen += g.advance;
                 }
                 break;
             }
             case MU_COMMAND_RECT:
-                push_quad(command->rect.rect, vig_atlas_white(), command->rect.color);
+                push_rect(command->rect.rect, fonts_.white_rect(), command->rect.color);
                 break;
             case MU_COMMAND_ICON: {
-                mu_Rect src = vig_atlas_icon(command->icon.id);
+                mu_Rect src = fonts_.icon_rect(command->icon.id);
                 mu_Rect r = command->icon.rect;
-                mu_Rect dst{r.x + (r.w - src.w) / 2, r.y + (r.h - src.h) / 2, src.w, src.h};
-                push_quad(dst, src, command->icon.color);
+                push_rect(mu_rect(r.x + (r.w - src.w) / 2, r.y + (r.h - src.h) / 2, src.w, src.h), src,
+                          command->icon.color);
                 break;
             }
             case MU_COMMAND_CLIP: {
@@ -374,6 +414,14 @@ void UiRenderer::render(mu_Context* ctx, VkCommandBuffer cmd, float scale_x, flo
     }
     flush();
     if (vertices_.empty()) return;
+
+    upload_atlas();
+    const float inv_w = 1.0f / float(atlas_width_);
+    const float inv_h = 1.0f / float(atlas_height_);
+    for (Vertex& v : vertices_) {
+        v.u *= inv_w;
+        v.v *= inv_h;
+    }
 
     VertexBuffer& vb = vertex_buffers_[vk_.frame_index()];
     ensure_capacity(vb, vertices_.size());

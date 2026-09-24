@@ -1,11 +1,15 @@
 #pragma once
 
+#include "platform/input.hpp"
+
 struct GLFWwindow;
 struct mu_Context;
 
 namespace vig {
 
-// GLFW window that forwards its input events to a microui context.
+// GLFW window that forwards input to a microui context and also records
+// the richer keyboard input (arrows, shortcuts, text) that widgets such as
+// the text editor need.
 class Window {
 public:
     Window(const char* title, int width, int height);
@@ -18,6 +22,7 @@ public:
 
     // Processes pending events; blocks while the window is minimised.
     void poll_events();
+    const FrameInput& input() const { return input_; }
     bool should_close() const;
 
     // True once after the framebuffer size changed.
@@ -37,6 +42,7 @@ private:
 
     GLFWwindow* window_ = nullptr;
     mu_Context* ui_ = nullptr;
+    FrameInput input_;
     bool resized_ = false;
 };
 

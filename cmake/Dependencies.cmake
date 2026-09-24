@@ -1,7 +1,8 @@
 # Third-party dependencies.
 #
-# Vulkan comes from the system (Vulkan SDK or distro packages). GLFW and
-# microui are fetched at configure time and pinned to exact revisions.
+# Vulkan comes from the system (Vulkan SDK or distro packages). GLFW,
+# FreeType and microui are fetched at configure time and pinned to exact
+# revisions.
 
 include(FetchContent)
 
@@ -19,6 +20,22 @@ FetchContent_Declare(glfw
     GIT_SHALLOW    TRUE
     SYSTEM)
 
+# --- FreeType --------------------------------------------------------------
+# Only the core rasteriser is needed: fonts are embedded TTFs, so skip the
+# optional compression/PNG/shaping dependencies for a self-contained build.
+set(FT_DISABLE_ZLIB     ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BZIP2    ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_PNG      ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BROTLI   ON CACHE BOOL "" FORCE)
+set(SKIP_INSTALL_ALL    ON CACHE BOOL "" FORCE)
+
+FetchContent_Declare(freetype
+    GIT_REPOSITORY https://github.com/freetype/freetype.git
+    GIT_TAG        VER-2-13-3
+    GIT_SHALLOW    TRUE
+    SYSTEM)
+
 # --- microui ---------------------------------------------------------------
 # microui ships no build system; we only need the sources (plus the demo's
 # font/icon atlas), so populate it and define the target ourselves.
@@ -27,7 +44,7 @@ FetchContent_Declare(microui
     GIT_TAG        0850aba860959c3e75fb3e97120ca92957f9d057
     SOURCE_SUBDIR  do-not-add-subdirectory)
 
-FetchContent_MakeAvailable(glfw microui)
+FetchContent_MakeAvailable(glfw freetype microui)
 
 add_library(microui STATIC ${microui_SOURCE_DIR}/src/microui.c)
 target_include_directories(microui SYSTEM PUBLIC ${microui_SOURCE_DIR}/src)

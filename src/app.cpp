@@ -1,9 +1,9 @@
 #include "app.hpp"
 
 #include "platform/window.hpp"
+#include "render/font.hpp"
 #include "render/ui_renderer.hpp"
 #include "render/vk_context.hpp"
-#include "ui/atlas.h"
 #include "ui/ide.hpp"
 
 #include "ui/mu.h"
@@ -14,11 +14,13 @@ namespace vig {
 
 namespace {
 
-void apply_style(mu_Context* ctx) {
+void apply_style(mu_Context* ctx, FontSystem& fonts) {
     mu_Style* s = ctx->style;
+    s->font = &fonts.ui();
+    s->size = mu_vec2(68, 14);
     s->padding = 5;
     s->spacing = 4;
-    s->title_height = 22;
+    s->title_height = 24;
     s->colors[MU_COLOR_TEXT] = mu_color(212, 212, 212, 255);
     s->colors[MU_COLOR_BORDER] = mu_color(20, 20, 22, 255);
     s->colors[MU_COLOR_WINDOWBG] = mu_color(37, 37, 40, 255);
@@ -40,16 +42,21 @@ void apply_style(mu_Context* ctx) {
 int run_app() {
     Window window("VIG IDE", 1280, 800);
     VulkanContext vk(window.handle());
-    UiRenderer renderer(vk);
+
+    // Rasterise glyphs at framebuffer resolution (2x on Retina displays).
+    float raster_scale = 1.0f, unused = 1.0f;
+    window.framebuffer_scale(raster_scale, unused);
+    FontSystem fonts(raster_scale);
+    UiRenderer renderer(vk, fonts);
 
     auto ui = std::make_unique<mu_Context>();
     mu_init(ui.get());
-    ui->text_width = vig_text_width;
-    ui->text_height = vig_text_height;
-    apply_style(ui.get());
+    ui->text_width = FontSystem::mu_text_width;
+    ui->text_height = FontSystem::mu_text_height;
+    apply_style(ui.get(), fonts);
     window.attach(ui.get());
 
-    Ide ide;
+    Ide ide(fonts);
     const VkClearColorValue clear{{0.09f, 0.09f, 0.10f, 1.0f}};
 
     while (!window.should_close()) {
@@ -60,7 +67,7 @@ int run_app() {
         window.size(width, height);
 
         mu_begin(ui.get());
-        ide.frame(ui.get(), width, height);
+        ide.frame(ui.get(), window.input(), width, height);
         mu_end(ui.get());
 
         if (VkCommandBuffer cmd = vk.begin_frame(clear)) {
