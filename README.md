@@ -10,14 +10,18 @@ immediate-mode UI and [FreeType](https://freetype.org/) text rendering.
 - Vulkan headers + loader and a GLSL compiler (`glslc` or `glslangValidator`).
   The [LunarG Vulkan SDK](https://vulkan.lunarg.com/) provides all of these on
   Windows, Linux and macOS.
-- Git (GLFW, FreeType and microui are fetched at configure time)
+- Git (GLFW, FreeType, nativefiledialog-extended and microui are fetched at
+  configure time)
+- Linux only: GTK 3 development files for the native file dialogs
+  (or configure with `-DVIGIDE_NFD_PORTAL=ON` to use xdg-desktop-portal,
+  which needs only libdbus-1 to build)
 
 On Debian/Ubuntu:
 
 ```sh
 sudo apt install cmake ninja-build libvulkan-dev glslc vulkan-validationlayers \
     libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
-    libwayland-dev libxkbcommon-dev
+    libwayland-dev libxkbcommon-dev libgtk-3-dev
 ```
 
 ## Build and run
@@ -55,8 +59,9 @@ Run the editor unit tests (no GPU needed) with `ctest --preset debug`.
 
 Find supports match case (`Aa`), whole word (`W`) and ECMAScript regular
 expressions (`.*`); regex replacements can use `$1`, `$&` etc. Replace All
-is a single undo step. New, Open and closing the window ask before
-discarding unsaved changes.
+is a single undo step. Open and Save As use the platform's native
+file dialogs. New, Open and closing the window ask before discarding unsaved
+changes.
 
 On macOS, Cmd replaces Ctrl. Syntax highlighting covers VIG assembly
 (`.vigas`) and C (`.c`/`.h`, for vigcc).
@@ -71,7 +76,7 @@ cmake/EmbedFiles.cmake    binary assets (fonts) -> embedded C arrays
 assets/fonts/             JetBrains Mono (code) and Inter (UI), SIL OFL 1.1
 shaders/                  UI vertex/fragment shaders
 src/main.cpp, app.cpp     entry point and main loop
-src/platform/             GLFW window; input for microui and the editor
+src/platform/             GLFW window, input, native file dialogs
 src/render/vk_context.*   instance, device, swapchain, frame sync
 src/render/font.*         FreeType fonts, glyph atlas (grows on demand)
 src/render/ui_renderer.*  microui command list -> Vulkan draws
@@ -79,9 +84,9 @@ src/editor/               text buffer, syntax highlighting, editor widget
 src/editor/search.*       find / replace engine (plain, whole word, regex)
 src/ui/ide.*              IDE shell: panels, shortcuts, unsaved-changes flow
 src/ui/find_bar.*         find / replace / go-to-line bar
-src/ui/file_dialog.*      Open / Save As dialog
 src/ui/widgets.*          small microui helpers (textbox paste, modals, ...)
 tests/                    editor core unit tests
+third_party/              xdg-foreign Wayland protocol XML (for nfd, MIT)
 ```
 
 ## Status
