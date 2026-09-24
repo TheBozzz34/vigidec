@@ -25,6 +25,8 @@ const mu_Color kLineNumberActive = {200, 200, 205, 255};
 const mu_Color kCurrentLine = {40, 40, 46, 255};
 const mu_Color kSelection = {38, 79, 120, 255};
 const mu_Color kSelectionUnfocused = {58, 61, 68, 255};
+const mu_Color kSearchMatch = {120, 90, 30, 150};
+const mu_Color kCurrentMatch = {170, 110, 30, 220};
 const mu_Color kCaret = {230, 230, 230, 255};
 const mu_Color kScrollTrack = {35, 35, 39, 255};
 const mu_Color kScrollThumb = {75, 75, 82, 255};
@@ -80,6 +82,7 @@ void TextEditor::set_text(std::string_view text) {
     undo_.clear();
     undo_pos_ = 0;
     saved_pos_ = 0;
+    ++version_;
     invalidate_from(0);
 }
 
@@ -221,7 +224,9 @@ void TextEditor::replace(TextPos a, TextPos b, std::string_view text, EditKind k
     const std::string inserted = strip_cr(text);
     if (a == b && inserted.empty()) return;
 
-    Edit e{a, buffer_.get(a, b), inserted, cursor_, anchor_, {}, kind, now_};
+    const int group = open_group_ ? open_group_ : next_group_++;
+    Edit e{a, buffer_.get(a, b), inserted, cursor_, anchor_, {}, kind, now_, group};
+    ++version_;
     buffer_.erase(a, b);
     const TextPos end = buffer_.insert(a, inserted);
     cursor_ = anchor_ = end;
@@ -231,7 +236,7 @@ void TextEditor::replace(TextPos a, TextPos b, std::string_view text, EditKind k
     ensure_cursor_visible_ = true;
 
     // Merge runs of typed characters into one undo step.
-    if (kind == EditKind::Typing && undo_pos_ > 0 && undo_pos_ == undo_.size() &&
+    if (kind == EditKind::Typing && !open_group_ && undo_pos_ > 0 && undo_pos_ == undo_.size() &&
         saved_pos_ != static_cast<long>(undo_pos_) && e.removed.empty()) {
         Edit& last = undo_.back();
         if (last.kind == EditKind::Typing && last.removed.empty() &&
@@ -258,25 +263,126 @@ void TextEditor::delete_selection() {
 
 void TextEditor::undo() {
     if (undo_pos_ == 0) return;
-    const Edit& e = undo_[--undo_pos_];
-    buffer_.erase(e.pos, TextBuffer::advance(e.pos, e.inserted));
-    buffer_.insert(e.pos, e.removed);
-    cursor_ = e.cursor_before;
-    anchor_ = e.anchor_before;
-    invalidate_from(e.pos.line);
+    const int group = undo_[undo_pos_ - 1].group;
+    while (undo_pos_ > 0 && undo_[undo_pos_ - 1].group == group) {
+        const Edit& e = undo_[--undo_pos_];
+        buffer_.erase(e.pos, TextBuffer::advance(e.pos, e.inserted));
+        buffer_.insert(e.pos, e.removed);
+        cursor_ = e.cursor_before;
+        anchor_ = e.anchor_before;
+        invalidate_from(e.pos.line);
+    }
+    ++version_;
     want_vcol_ = -1;
     ensure_cursor_visible_ = true;
 }
 
 void TextEditor::redo() {
     if (undo_pos_ >= undo_.size()) return;
-    const Edit& e = undo_[undo_pos_++];
-    buffer_.erase(e.pos, TextBuffer::advance(e.pos, e.removed));
-    buffer_.insert(e.pos, e.inserted);
-    cursor_ = anchor_ = e.cursor_after;
-    invalidate_from(e.pos.line);
+    const int group = undo_[undo_pos_].group;
+    while (undo_pos_ < undo_.size() && undo_[undo_pos_].group == group) {
+        const Edit& e = undo_[undo_pos_++];
+        buffer_.erase(e.pos, TextBuffer::advance(e.pos, e.removed));
+        buffer_.insert(e.pos, e.inserted);
+        cursor_ = anchor_ = e.cursor_after;
+        invalidate_from(e.pos.line);
+    }
+    ++version_;
     want_vcol_ = -1;
     ensure_cursor_visible_ = true;
+}
+
+// --- Selection & search -------------------------------------------------------
+
+void TextEditor::select(TextPos anchor, TextPos cursor) {
+    anchor_ = buffer_.clamp(anchor);
+    cursor_ = buffer_.clamp(cursor);
+    want_vcol_ = -1;
+    ensure_cursor_visible_ = true;
+    center_cursor_ = true;
+}
+
+void TextEditor::go_to_line(int line) {
+    line = std::clamp(line, 0, buffer_.line_count() - 1);
+    const int indent = leading_whitespace(buffer_.line(line));
+    select({line, indent}, {line, indent});
+}
+
+void TextEditor::set_search(const SearchQuery& query) {
+    if (query == query_) return;
+    query_ = query;
+    searcher_.compile(query_, search_error_);
+    matches_version_ = ~uint64_t(0);
+}
+
+const std::vector<SearchMatch>& TextEditor::matches() {
+    if (matches_version_ != version_) {
+        searcher_.find_all(buffer_, matches_);
+        matches_version_ = version_;
+    }
+    return matches_;
+}
+
+int TextEditor::match_index_at_selection() {
+    const std::vector<SearchMatch>& ms = matches();
+    const TextPos a = sel_start(), b = sel_end();
+    auto it = std::lower_bound(ms.begin(), ms.end(), a,
+                               [](const SearchMatch& m, TextPos p) { return m.start < p; });
+    if (it != ms.end() && it->start == a && it->end == b) return int(it - ms.begin());
+    return -1;
+}
+
+bool TextEditor::find_from(TextPos from, bool backward) {
+    const std::vector<SearchMatch>& ms = matches();
+    if (ms.empty()) return false;
+    const SearchMatch* hit = nullptr;
+    if (backward) {
+        auto it = std::lower_bound(ms.begin(), ms.end(), from,
+                                   [](const SearchMatch& m, TextPos p) { return m.start < p; });
+        hit = it == ms.begin() ? &ms.back() : &*(it - 1);
+    } else {
+        auto it = std::lower_bound(ms.begin(), ms.end(), from,
+                                   [](const SearchMatch& m, TextPos p) { return m.start < p; });
+        hit = it == ms.end() ? &ms.front() : &*it;
+    }
+    select(hit->start, hit->end);
+    return true;
+}
+
+bool TextEditor::find_next(bool backward) {
+    if (backward) return find_from(sel_start(), true);
+    // Step past the current match so repeated "next" advances.
+    const int current = match_index_at_selection();
+    return find_from(current >= 0 ? next_char(sel_start()) : sel_end(), false);
+}
+
+void TextEditor::replace_current(std::string_view replacement) {
+    const int index = match_index_at_selection();
+    if (index < 0) {
+        find_next(false);
+        return;
+    }
+    const SearchMatch m = matches()[size_t(index)];
+    const std::string text = searcher_.replacement_for(buffer_, m, replacement);
+    replace(m.start, m.end, text, EditKind::Other);
+    find_from(cursor_, false);
+}
+
+int TextEditor::replace_all(std::string_view replacement) {
+    const std::vector<SearchMatch> ms = matches();
+    if (ms.empty()) return 0;
+
+    // Compute every replacement against the original text first (regex
+    // groups may look at text that earlier replacements would change), then
+    // apply back to front so earlier positions stay valid.
+    std::vector<std::string> texts;
+    texts.reserve(ms.size());
+    for (const SearchMatch& m : ms) texts.push_back(searcher_.replacement_for(buffer_, m, replacement));
+
+    open_group_ = next_group_++;
+    for (size_t i = ms.size(); i-- > 0;) replace(ms[i].start, ms[i].end, texts[i], EditKind::Other);
+    open_group_ = 0;
+    return int(ms.size());
 }
 
 void TextEditor::indent_lines(bool unindent) {
@@ -352,6 +458,8 @@ void TextEditor::clamp_scroll(const Layout& lay) {
 
 void TextEditor::scroll_to_cursor(const Layout& lay) {
     const float y = float(cursor_.line * lay.line_h);
+    const bool offscreen = y < scroll_y_ || y + float(lay.line_h) > scroll_y_ + float(lay.text.h);
+    if (center_cursor_ && offscreen) scroll_y_ = y - float(lay.text.h - lay.line_h) * 0.5f;
     if (y < scroll_y_) scroll_y_ = y;
     if (y + float(lay.line_h) > scroll_y_ + float(lay.text.h)) scroll_y_ = y + float(lay.line_h) - float(lay.text.h);
 
@@ -464,8 +572,7 @@ void TextEditor::handle_mouse(mu_Context* ctx, const Layout& lay) {
     }
 }
 
-bool TextEditor::handle_keys(const FrameInput& input, const Layout& lay) {
-    bool save = false;
+void TextEditor::handle_keys(const FrameInput& input, const Layout& lay) {
     const int page = std::max(1, lay.text.h / lay.line_h - 1);
 
     for (const KeyEvent& ev : input.keys) {
@@ -498,14 +605,6 @@ bool TextEditor::handle_keys(const FrameInput& input, const Layout& lay) {
                     }
                     break;
                 case Key::V: insert_text(input.clipboard(), EditKind::Other); break;
-                case Key::Z:
-                    if (shift) {
-                        redo();
-                    } else {
-                        undo();
-                    }
-                    break;
-                case Key::Y: redo(); break;
                 case Key::D: {  // duplicate selection or line
                     if (has_selection()) {
                         const std::string text = buffer_.get(sel_start(), sel_end());
@@ -521,7 +620,6 @@ bool TextEditor::handle_keys(const FrameInput& input, const Layout& lay) {
                     }
                     break;
                 }
-                case Key::S: save = true; break;
                 case Key::Left: move_to(word_left(cursor_), shift); break;
                 case Key::Right: move_to(word_right(cursor_), shift); break;
                 case Key::Home: move_to(buffer_.begin(), shift); break;
@@ -634,7 +732,6 @@ bool TextEditor::handle_keys(const FrameInput& input, const Layout& lay) {
         last_activity_ = now_;
         insert_text(typed, EditKind::Typing);
     }
-    return save;
 }
 
 void TextEditor::draw_line_text(mu_Context* ctx, const Layout& lay, Font& font, int line, int y) {
@@ -679,17 +776,34 @@ void TextEditor::draw(mu_Context* ctx, const Layout& lay, Font& font, bool focus
     update_highlight_states(last);
 
     mu_push_clip_rect(ctx, lay.text);
+
     if (!has_selection()) {
         mu_draw_rect(ctx, mu_rect(lay.text.x, line_y(cursor_.line), lay.text.w, lay.line_h), kCurrentLine);
-    } else {
+    }
+
+    if (!query_.empty()) {
+        const std::vector<SearchMatch>& ms = matches();
+        auto it = std::lower_bound(ms.begin(), ms.end(), TextPos{first, 0},
+                                   [](const SearchMatch& m, TextPos p) { return m.start < p; });
+        for (; it != ms.end() && it->start.line <= last; ++it) {
+            const int x0 = col_x(it->start.line, it->start.col);
+            const int x1 = col_x(it->end.line, it->end.col);
+            mu_draw_rect(ctx, mu_rect(x0, line_y(it->start.line), x1 - x0, lay.line_h), kSearchMatch);
+        }
+    }
+
+    if (has_selection()) {
+        // With focus in the find bar, show the current match prominently.
+        const mu_Color color = focused                          ? kSelection
+                               : match_index_at_selection() >= 0 ? kCurrentMatch
+                                                                 : kSelectionUnfocused;
         const TextPos s = sel_start(), e = sel_end();
         for (int l = std::max(first, s.line); l <= std::min(last, e.line); ++l) {
             const int x0 = col_x(l, l == s.line ? s.col : 0);
             // Selected line breaks show as a half-column sliver.
             const int x1 = l == e.line ? col_x(l, e.col)
                                        : col_x(l, int(buffer_.line(l).size())) + int(lay.col_w * 0.5f);
-            mu_draw_rect(ctx, mu_rect(x0, line_y(l), x1 - x0, lay.line_h),
-                         focused ? kSelection : kSelectionUnfocused);
+            mu_draw_rect(ctx, mu_rect(x0, line_y(l), x1 - x0, lay.line_h), color);
         }
     }
 
@@ -734,12 +848,15 @@ void TextEditor::draw(mu_Context* ctx, const Layout& lay, Font& font, bool focus
     }
 }
 
-bool TextEditor::update(mu_Context* ctx, const FrameInput& input, Font& font) {
+void TextEditor::update(mu_Context* ctx, const FrameInput& input, Font& font) {
     now_ = input.time;
 
     const mu_Rect bounds = mu_layout_next(ctx);
     const mu_Id id = mu_get_id(ctx, &buffer_, sizeof(&buffer_));
     mu_update_control(ctx, id, bounds, MU_OPT_HOLDFOCUS);
+    // Keys this frame belonged to whatever had focus before (e.g. the Enter
+    // that confirmed "go to line"), so don't act on them.
+    const bool focus_just_requested = focus_requested_;
     if (focus_requested_) {
         mu_set_focus(ctx, id);
         focus_requested_ = false;
@@ -749,18 +866,18 @@ bool TextEditor::update(mu_Context* ctx, const FrameInput& input, Font& font) {
     handle_mouse(ctx, lay);
 
     const bool focused = ctx->focus == id;
-    bool save = false;
-    if (focused) save = handle_keys(input, lay);
+    focused_ = focused;
+    if (focused && !focus_just_requested) handle_keys(input, lay);
 
     lay = compute_layout(bounds, font);  // content may have changed
     if (ensure_cursor_visible_) {
         scroll_to_cursor(lay);
         ensure_cursor_visible_ = false;
+        center_cursor_ = false;
     }
     clamp_scroll(lay);
 
     draw(ctx, lay, font, focused);
-    return save;
 }
 
 }  // namespace vig

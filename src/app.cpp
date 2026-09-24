@@ -59,8 +59,9 @@ int run_app() {
     Ide ide(fonts);
     const VkClearColorValue clear{{0.09f, 0.09f, 0.10f, 1.0f}};
 
-    while (!window.should_close()) {
+    while (!ide.should_quit()) {
         window.poll_events();
+        if (window.consume_close_request()) ide.request_quit();
         if (window.consume_resized()) vk.request_resize();
 
         int width = 0, height = 0;

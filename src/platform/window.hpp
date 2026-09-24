@@ -23,7 +23,9 @@ public:
     // Processes pending events; blocks while the window is minimised.
     void poll_events();
     const FrameInput& input() const { return input_; }
-    bool should_close() const;
+    // True once after the user tried to close the window. The window stays
+    // open; the application decides whether to quit.
+    bool consume_close_request();
 
     // True once after the framebuffer size changed.
     bool consume_resized();
@@ -39,11 +41,13 @@ private:
     static void on_key(GLFWwindow* w, int key, int scancode, int action, int mods);
     static void on_char(GLFWwindow* w, unsigned int codepoint);
     static void on_framebuffer_size(GLFWwindow* w, int width, int height);
+    static void on_close(GLFWwindow* w);
 
     GLFWwindow* window_ = nullptr;
     mu_Context* ui_ = nullptr;
     FrameInput input_;
     bool resized_ = false;
+    bool close_requested_ = false;
 };
 
 }  // namespace vig

@@ -40,7 +40,11 @@ add_executable(vigide
     src/editor/text_buffer.cpp
     src/editor/highlight.cpp
     src/editor/text_editor.cpp
+    src/editor/search.cpp
     src/ui/microui_icons.c
+    src/ui/widgets.cpp
+    src/ui/find_bar.cpp
+    src/ui/file_dialog.cpp
     src/ui/ide.cpp)
 
 vigide_embed_files(vigide
@@ -85,7 +89,8 @@ if(VIGIDE_BUILD_TESTS)
     add_executable(vigide_editor_tests
         tests/editor_tests.cpp
         src/editor/text_buffer.cpp
-        src/editor/highlight.cpp)
+        src/editor/highlight.cpp
+        src/editor/search.cpp)
     target_include_directories(vigide_editor_tests PRIVATE src)
     target_compile_features(vigide_editor_tests PRIVATE cxx_std_20)
     add_test(NAME editor COMMAND vigide_editor_tests)

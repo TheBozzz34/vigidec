@@ -1,6 +1,7 @@
 // Minimal self-contained tests for the editor core (no GPU or window needed).
 
 #include "editor/highlight.hpp"
+#include "editor/search.hpp"
 #include "editor/text_buffer.hpp"
 
 #include <cstdio>
@@ -99,6 +100,53 @@ void test_highlight_c_block_comment() {
     CHECK(spans.back().token == vig::Token::Punct);
 }
 
+std::vector<vig::SearchMatch> search(const TextBuffer& b, vig::SearchQuery q) {
+    vig::Searcher s;
+    std::string error;
+    CHECK(s.compile(q, error));
+    std::vector<vig::SearchMatch> out;
+    s.find_all(b, out);
+    return out;
+}
+
+void test_search_plain() {
+    TextBuffer b;
+    b.set_text("push x\nPUSH pushx\n  push");
+    vig::SearchQuery q{"push"};
+    auto m = search(b, q);
+    CHECK(m.size() == 4);  // case-insensitive by default
+    CHECK(m[1].start == (TextPos{1, 0}) && m[1].end == (TextPos{1, 4}));
+
+    q.match_case = true;
+    CHECK(search(b, q).size() == 3);
+
+    q.whole_word = true;
+    m = search(b, q);
+    CHECK(m.size() == 2);  // "pushx" excluded
+    CHECK(m[1].start == (TextPos{2, 2}));
+}
+
+void test_search_regex() {
+    TextBuffer b;
+    b.set_text("load globals+0\nstore globals+12");
+    vig::SearchQuery q{"globals\\+(\\d+)", false, false, true};
+    vig::Searcher s;
+    std::string error;
+    CHECK(s.compile(q, error));
+    std::vector<vig::SearchMatch> m;
+    s.find_all(b, m);
+    CHECK(m.size() == 2);
+    CHECK(s.replacement_for(b, m[1], "data[$1]") == "data[12]");
+
+    // Empty matches are skipped and don't hang.
+    q.text = "x*";
+    CHECK(search(b, q).empty());
+
+    q.text = "(";
+    CHECK(!s.compile(q, error));
+    CHECK(!error.empty());
+}
+
 }  // namespace
 
 int main() {
@@ -108,6 +156,8 @@ int main() {
     test_clamp();
     test_highlight_vigasm();
     test_highlight_c_block_comment();
+    test_search_plain();
+    test_search_regex();
     if (failures) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;
